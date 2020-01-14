@@ -53,14 +53,14 @@ func (m ConcurrentMap) Set(key string, value interface{}) {
 // It is called while lock is held, therefore it MUST NOT
 // try to access other keys in same map, as it can lead to deadlock since
 // Go sync.RWLock is not reentrant
-type UpsertCb func(exist bool, valueInMap interface{}, newValue interface{}) interface{}
+type UpsertCb func(exist bool, v interface{}) interface{}
 
 // Insert or Update - updates existing element or inserts a new one using UpsertCb
-func (m ConcurrentMap) Upsert(key string, value interface{}, cb UpsertCb) (res interface{}) {
+func (m ConcurrentMap) Upsert(key string, cb UpsertCb) (res interface{}) {
 	shard := m.GetShard(key)
 	shard.Lock()
 	v, ok := shard.items[key]
-	res = cb(ok, v, value)
+	res = cb(ok, v)
 	shard.items[key] = res
 	shard.Unlock()
 	return res
@@ -244,7 +244,7 @@ func (m ConcurrentMap) Items() map[string]interface{} {
 // maps. RLock is held for all calls for a given shard
 // therefore callback sess consistent view of a shard,
 // but not across the shards
-type IterCb func(key string, v interface{})
+type IterCb func(key string, v interface{}) (stop bool)
 
 // Callback based iterator, cheapest way to read
 // all elements in a map.
@@ -253,7 +253,10 @@ func (m ConcurrentMap) IterCb(fn IterCb) {
 		shard := (m)[idx]
 		shard.RLock()
 		for key, value := range shard.items {
-			fn(key, value)
+			if fn(key, value) {
+				shard.RUnlock()
+				return
+			}
 		}
 		shard.RUnlock()
 	}
