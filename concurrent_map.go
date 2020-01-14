@@ -53,17 +53,19 @@ func (m ConcurrentMap) Set(key string, value interface{}) {
 // It is called while lock is held, therefore it MUST NOT
 // try to access other keys in same map, as it can lead to deadlock since
 // Go sync.RWLock is not reentrant
-type UpsertCb func(exist bool, v interface{}) interface{}
+type UpsertCb func(exist bool, valueInMap interface{}) (newValue interface{}, upserted bool)
 
 // Insert or Update - updates existing element or inserts a new one using UpsertCb
-func (m ConcurrentMap) Upsert(key string, cb UpsertCb) (res interface{}) {
+func (m ConcurrentMap) Upsert(key string, cb UpsertCb) interface{} {
 	shard := m.GetShard(key)
 	shard.Lock()
 	v, ok := shard.items[key]
-	res = cb(ok, v)
-	shard.items[key] = res
+	newValue, upserted := cb(ok, v)
+	if upserted {
+		shard.items[key] = res
+	}
 	shard.Unlock()
-	return res
+	return newValue
 }
 
 // Sets the given value under the specified key if no value was associated with it.
