@@ -49,52 +49,23 @@ func (m ConcurrentMap) Set(key string, value interface{}) {
 	shard.Unlock()
 }
 
-type Modification interface {
-	Apply(shard *ConcurrentMapShared, key string)
-}
-
-type ModUpsert struct {
-	newValue interface{}
-}
-
-// modify with insert or update
-func NewModUpsert(newValue interface{}) Modification {
-	return &ModUpsert{
-		newValue: newValue,
-	}
-}
-
-func (m *ModUpsert) Apply(shard *ConcurrentMapShared, key string) {
-	shard.items[key] = m.newValue
-}
-
-// modify with remove
-type ModRemove struct{}
-
-func NewModRemove() Modification {
-	return &ModRemove{}
-}
-
-func (m *ModRemove) Apply(shard *ConcurrentMapShared, key string) {
-	delete(shard.items, key)
-}
-
-// Callback to return new modification apply to the map sharded
+// Callback to return new element to be inserted into the map
 // It is called while lock is held, therefore it MUST NOT
 // try to access other keys in same map, as it can lead to deadlock since
 // Go sync.RWLock is not reentrant
-type ModifyCb func(exist bool, valueInMap interface{}) Modification
+type UpsertCb func(exist bool, valueInMap interface{}) (newValue interface{}, upserted bool)
 
-// Modify using ModifyCb
-func (m ConcurrentMap) Modify(key string, cb ModifyCb) {
+// Insert or Update - updates existing element or inserts a new one using UpsertCb
+func (m ConcurrentMap) Upsert(key string, cb UpsertCb) interface{} {
 	shard := m.GetShard(key)
 	shard.Lock()
 	v, ok := shard.items[key]
-	mod := cb(ok, v)
-	if mod != nil {
-		mod.Apply(shard, key)
+	newValue, upserted := cb(ok, v)
+	if upserted {
+		shard.items[key] = newValue
 	}
 	shard.Unlock()
+	return newValue
 }
 
 // Sets the given value under the specified key if no value was associated with it.
@@ -151,6 +122,26 @@ func (m ConcurrentMap) Remove(key string) {
 	shard.Lock()
 	delete(shard.items, key)
 	shard.Unlock()
+}
+
+// RemoveCb is a callback executed in a map.RemoveCb() call, while Lock is held
+// If returns true, the element will be removed from the map
+type RemoveCb func(key string, v interface{}, exists bool) bool
+
+// RemoveCb locks the shard containing the key, retrieves its current value and calls the callback with those params
+// If callback returns true and element exists, it will remove it from the map
+// Returns the value returned by the callback (even if element was not present in the map)
+func (m ConcurrentMap) RemoveCb(key string, cb RemoveCb) bool {
+	// Try to get shard.
+	shard := m.GetShard(key)
+	shard.Lock()
+	v, ok := shard.items[key]
+	remove := cb(key, v, ok)
+	if remove && ok {
+		delete(shard.items, key)
+	}
+	shard.Unlock()
+	return remove
 }
 
 // Pop removes an element from the map and returns it
@@ -255,7 +246,7 @@ func (m ConcurrentMap) Items() map[string]interface{} {
 // maps. RLock is held for all calls for a given shard
 // therefore callback sess consistent view of a shard,
 // but not across the shards
-type IterCb func(key string, valueInMap interface{}) (mod Modification, stop bool)
+type IterCb func(key string, v interface{}) (stop bool)
 
 // Callback based iterator, cheapest way to read
 // all elements in a map.
@@ -264,11 +255,7 @@ func (m ConcurrentMap) IterCb(fn IterCb) {
 		shard := (m)[idx]
 		shard.RLock()
 		for key, value := range shard.items {
-			mod, stop := fn(key, value)
-			if mod != nil {
-				mod.Apply(shard, key)
-			}
-			if stop {
+			if fn(key, value) {
 				shard.RUnlock()
 				return
 			}
